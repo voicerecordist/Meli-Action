@@ -1,27 +1,32 @@
-name: تلگرام دانلودر (چند لینک، سریع)
+name: تلگرام دانلودر (هوشمند – حذف قبل از checkout)
 
 on:
   workflow_dispatch:
     inputs:
       telegram_links:
-        description: '🔗 لینک‌های تلگرام (حداکثر ۱۰ عدد، جدا با کاما، فاصله یا خط جدید)'
+        description: '🔗 لینک‌های تلگرام (حداکثر ۲۰ عدد، جدا با کاما، فاصله یا خط جدید)'
         required: true
         type: string
       split_threshold_mb:
-        description: '📦 حداکثر حجم قطعه (MB) – 0 = بدون تقسیم'
+        description: '📦 حداکثر حجم هر قطعه (MB) – 0 = بدون تقسیم'
         required: false
         type: number
         default: 90
       subfolder:
-        description: '📁 زیرپوشه دلخواه در downloads (اختیاری)'
+        description: '📁 زیرپوشهٔ دلخواه در downloads (اختیاری)'
         required: false
         type: string
         default: ''
       custom_filename:
-        description: '✏️ نام فایل دلخواه (فقط برای یک فایل؛ پسوند حفظ می‌شود)'
+        description: '✏️ نام فایل دلخواه (فقط برای تک‌فایل)'
         required: false
         type: string
         default: ''
+      clean_previous:
+        description: '🗑️ پاک‌سازی همهٔ فایل‌های downloads قبل از دانلود (پیشنهاد: تیک بخورد)'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -33,13 +38,64 @@ jobs:
       contents: write
 
     steps:
-      - name: 📂 دریافت فقط شاخهٔ downloads (سریع)
+      # ──────────────────────────────────────
+      # قدم اول: حذف فایل‌های قدیمی روی سرور گیتهاب (بدون checkout)
+      # ──────────────────────────────────────
+      - name: 🗑️ حذف محتوای downloads روی سرور (API)
+        if: github.event.inputs.clean_previous == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          API="https://api.github.com/repos/${REPO}/contents/downloads?ref=${BRANCH}"
+          echo "📡 دریافت لیست فایل‌های موجود در downloads..."
+          FILES=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+                       -H "Accept: application/vnd.github+json" \
+                       "$API")
+
+          # اگر خطا بود یا پوشه وجود نداشت، ادامه بده
+          if echo "$FILES" | grep -q "Not Found"; then
+            echo "📂 پوشهٔ downloads وجود ندارد – چیزی برای حذف نیست."
+            exit 0
+          fi
+
+          # اگر فایلی نیست
+          COUNT=$(echo "$FILES" | jq '. | length')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "📂 پوشهٔ downloads خالی است."
+            exit 0
+          fi
+
+          echo "🔍 $COUNT فایل پیدا شد – در حال حذف یکی‌یکی..."
+          for row in $(echo "$FILES" | jq -r '.[] | @base64'); do
+            _jq() { echo "$row" | base64 --decode | jq -r "$1"; }
+            NAME=$(_jq '.name')
+            SHA=$(_jq '.sha')
+            PATH_URL="downloads/${NAME}"
+            echo "   🗑️ حذف $NAME ..."
+            curl -s -X DELETE \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/contents/${PATH_URL}" \
+              -d "{\"message\":\"پاک‌سازی پیش از دانلود\",\"sha\":\"${SHA}\",\"branch\":\"${BRANCH}\"}" \
+              > /dev/null
+          done
+          echo "✅ همهٔ فایل‌های قبلی از سرور حذف شدند."
+
+      # ──────────────────────────────────────
+      # قدم دوم: دریافت شاخه (حالا سبک و سریع)
+      # ──────────────────────────────────────
+      - name: 📂 دریافت مخزن (فقط آخرین نسخه)
         uses: actions/checkout@v5
         with:
-          ref: downloads                     # شاخهٔ سبک مخصوص فایل‌ها
+          ref: ${{ github.ref_name }}
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 1                     # فقط آخرین commit بدون تاریخچه
+          fetch-depth: 1
 
+      # ──────────────────────────────────────
+      # بقیه مراحل مثل قبل
+      # ──────────────────────────────────────
       - name: 🔧 نصب ابزارهای ضروری
         run: |
           sudo apt-get update
@@ -48,7 +104,7 @@ jobs:
       - name: 🐍 نصب کتابخانه‌های پایتون
         run: pip3 install requests
 
-      - name: 📝 ساخت اسکریپت اصلاح‌شده
+      - name: 📝 ساخت اسکریپت دانلودر
         run: |
           cat > telegram_downloader.py << 'EOF'
           #!/usr/bin/env python3
@@ -78,9 +134,9 @@ jobs:
                   if l not in seen:
                       seen.add(l)
                       unique_links.append(l)
-              if len(unique_links) > 10:
-                  print(f"⚠️ بیش از ۱۰ لینک تحلیل شد. فقط ۱۰ لینک اول بررسی می‌شوند.")
-                  unique_links = unique_links[:10]
+              if len(unique_links) > 20:
+                  print(f"⚠️ بیش از ۲۰ لینک تشخیص داده شد. فقط ۲۰ لینک اول پردازش می‌شود.")
+                  unique_links = unique_links[:20]
               print(f"✅ {len(unique_links)} لینک معتبر شناسایی شد.")
               return unique_links
 
@@ -197,7 +253,7 @@ jobs:
               headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
               results = []
-              with ThreadPoolExecutor(max_workers=10) as executor:
+              with ThreadPoolExecutor(max_workers=20) as executor:
                   futures = {executor.submit(process_one_link, link, base, headers): link for link in links}
                   for future in as_completed(futures):
                       link = futures[future]
@@ -277,7 +333,7 @@ jobs:
           export CUSTOM_FILENAME="${{ github.event.inputs.custom_filename }}"
           python3 telegram_downloader.py
 
-      - name: 📤 ارسال فایل‌ها به شاخهٔ downloads
+      - name: 📤 ارسال فایل‌های جدید به مخزن
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -297,7 +353,7 @@ jobs:
           git commit -m "Add downloaded files [skip ci]"
 
           for attempt in 1 2 3; do
-            if git push origin downloads 2>&1; then
+            if git push origin ${{ github.ref_name }} 2>&1; then
               echo "   ✅ بارگذاری موفق"
               break
             else
@@ -310,4 +366,3 @@ jobs:
               fi
             fi
           done
-          
